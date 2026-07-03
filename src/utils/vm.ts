@@ -1,6 +1,8 @@
 import { VM } from "vm2";
 import sharp from "sharp";
-import axios from "axios";
+import axios, { type AxiosInstance } from "axios";
+import { HttpsProxyAgent } from "https-proxy-agent";
+import { HttpProxyAgent } from "http-proxy-agent";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createDeepSeek } from "@ai-sdk/deepseek";
 import { createZhipu } from "zhipu-ai-provider";
@@ -12,10 +14,182 @@ import { createXai } from "@ai-sdk/xai";
 import { createMinimax } from "vercel-minimax-ai-provider";
 import FormData from "form-data";
 import jsonwebtoken from "jsonwebtoken";
-import u from "@/utils";
+import normalizeError from "@/utils/error";
 import crypto from "node:crypto";
+import https from "node:https";
+import { Readable } from "node:stream";
+import { execSync } from "node:child_process";
+
+const httpsAgent = new https.Agent({ family: 4, keepAlive: true });
+
+let cachedProxyUrl: string | null | undefined;
+
+function readWindowsSystemProxy(): string | undefined {
+  if (process.platform !== "win32") return undefined;
+  try {
+    const enableOut = execSync(
+      'reg query "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyEnable',
+      { encoding: "utf8", windowsHide: true },
+    );
+    if (!/0x1/.test(enableOut)) return undefined;
+    const serverOut = execSync(
+      'reg query "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings" /v ProxyServer',
+      { encoding: "utf8", windowsHide: true },
+    );
+    const match = serverOut.match(/ProxyServer\s+REG_SZ\s+(\S+)/);
+    if (!match) return undefined;
+    const server = match[1].trim();
+    return server.includes("://") ? server : `http://${server}`;
+  } catch {
+    return undefined;
+  }
+}
+
+async function resolveProxyUrl(targetUrl: string): Promise<string | undefined> {
+  const syncProxy = getProxyUrlSync();
+  if (syncProxy) return syncProxy;
+
+  try {
+    if (process.versions.electron) {
+      const { session } = require("electron") as typeof import("electron");
+      const result = await session.defaultSession.resolveProxy(targetUrl);
+      const proxyMatch = result.match(/(?:PROXY|HTTPS|HTTP)\s+([^;\s]+)/i);
+      if (proxyMatch) {
+        const host = proxyMatch[1];
+        const url = host.includes("://") ? host : `http://${host}`;
+        cachedProxyUrl = url;
+        return url;
+      }
+    }
+  } catch {
+    // Electron 代理解析失败时忽略
+  }
+
+  return undefined;
+}
+
+function getProxyUrlSync(): string | undefined {
+  if (cachedProxyUrl !== undefined) return cachedProxyUrl ?? undefined;
+
+  const fromEnv =
+    process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy;
+  if (fromEnv) {
+    cachedProxyUrl = fromEnv;
+    return fromEnv;
+  }
+
+  const systemProxy = readWindowsSystemProxy();
+  cachedProxyUrl = systemProxy ?? null;
+  return systemProxy;
+}
+
+function createAxiosClient(): AxiosInstance {
+  const proxyUrl = getProxyUrlSync();
+  if (proxyUrl) {
+    return axios.create({
+      httpAgent: new HttpProxyAgent(proxyUrl),
+      httpsAgent: new HttpsProxyAgent(proxyUrl),
+      proxy: false,
+    });
+  }
+  return axios.create({ httpsAgent, proxy: false });
+}
+
+function headersToRecord(headers?: HeadersInit): Record<string, string> {
+  const result: Record<string, string> = {};
+  if (!headers) return result;
+  if (headers instanceof Headers) {
+    headers.forEach((v, k) => {
+      result[k] = v;
+    });
+    return result;
+  }
+  if (Array.isArray(headers)) {
+    for (const [k, v] of headers) result[k] = v;
+    return result;
+  }
+  return { ...(headers as Record<string, string>) };
+}
+
+function isStreamRequest(init?: RequestInit): boolean {
+  if (!init?.body || typeof init.body !== "string") return false;
+  try {
+    return JSON.parse(init.body).stream === true;
+  } catch {
+    return false;
+  }
+}
+
+function nodeStreamToWebStream(stream: Readable): ReadableStream<Uint8Array> {
+  return new ReadableStream({
+    start(controller) {
+      stream.on("data", (chunk: Buffer) => controller.enqueue(new Uint8Array(chunk)));
+      stream.on("end", () => controller.close());
+      stream.on("error", (err) => controller.error(err));
+    },
+    cancel() {
+      stream.destroy();
+    },
+  });
+}
+
+/** 供 AI SDK / fetch 使用，走与图片请求相同的系统代理 */
+export function createProxiedFetch(client: AxiosInstance): typeof fetch {
+  return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    const method = (init?.method ?? "GET").toUpperCase();
+    const headers = headersToRecord(init?.headers);
+    const streamRequest = isStreamRequest(init);
+
+    const response = await client.request({
+      url,
+      method,
+      headers,
+      data: init?.body,
+      responseType: streamRequest ? "stream" : "arraybuffer",
+      validateStatus: () => true,
+      signal: init?.signal ?? undefined,
+      timeout: 600000,
+    });
+
+    const responseHeaders = new Headers();
+    for (const [key, value] of Object.entries(response.headers)) {
+      if (value === undefined) continue;
+      responseHeaders.set(key, Array.isArray(value) ? value.join(", ") : String(value));
+    }
+
+    const raw = response.data;
+    const body = streamRequest
+      ? nodeStreamToWebStream(raw as Readable)
+      : raw instanceof ArrayBuffer
+        ? raw
+        : new Uint8Array(raw as Buffer);
+
+    return new Response(body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: responseHeaders,
+    });
+  };
+}
+
+export async function createAxios(targetUrl = "https://api.openai.com"): Promise<AxiosInstance> {
+  const proxyUrl = (await resolveProxyUrl(targetUrl)) ?? getProxyUrlSync();
+  if (proxyUrl) {
+    return axios.create({
+      httpAgent: new HttpProxyAgent(proxyUrl),
+      httpsAgent: new HttpsProxyAgent(proxyUrl),
+      proxy: false,
+    });
+  }
+  return axios.create({ httpsAgent, proxy: false });
+}
 export default function runCode(code: string, vendor?: Record<string, any>) {
   code = code.replace(/export\s*\{\s*\};?/g, ""); // 去掉 export {} 以免沙盒环境报错
+  const vendorAxios = createAxiosClient();
+  const proxiedFetch = createProxiedFetch(vendorAxios);
+  const proxyUrl = getProxyUrlSync();
+  if (proxyUrl) logger(`[网络] 使用代理：${proxyUrl}`);
   // 创建一个沙盒
   const exports = {};
   const sandbox: Record<string, any> = {
@@ -33,10 +207,13 @@ export default function runCode(code: string, vendor?: Record<string, any>) {
     urlToBase64,
     mergeImages,
     pollTask,
-    fetch: fetch,
+    fetch: proxiedFetch,
+    proxiedFetch,
     exports,
-    axios,
+    axios: vendorAxios,
+    createAxios,
     FormData,
+    httpsAgent: vendorAxios.defaults.httpsAgent ?? httpsAgent,
     logger,
     jsonwebtoken,
     crypto,
@@ -81,10 +258,26 @@ export async function zipImageResolution(completeBase64: string, width: number, 
 
 //url转Base64
 export async function urlToBase64(url: string): Promise<string> {
-  const res = await axios.get(url, { responseType: "arraybuffer" });
-  const mime = res.headers["content-type"] || "image/jpeg";
-  const b64 = Buffer.from(res.data).toString("base64");
-  return `data:${mime};base64,${b64}`;
+  const client = await createAxios(url);
+  let lastErr: unknown;
+  for (let i = 0; i < 5; i++) {
+    try {
+      const res = await client.get(url, { responseType: "arraybuffer", timeout: 600000 });
+      const mime = res.headers["content-type"] || "image/jpeg";
+      const b64 = Buffer.from(res.data).toString("base64");
+      return `data:${mime};base64,${b64}`;
+    } catch (e) {
+      lastErr = e;
+      if (!isTransientNetworkError(e) || i === 4) break;
+      await new Promise((res) => setTimeout(res, 3000));
+    }
+  }
+  throw lastErr;
+}
+
+function isTransientNetworkError(err: unknown): boolean {
+  const msg = normalizeError(err).message || "";
+  return /ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|ECONNABORTED|socket disconnected|TLS|timeout|AggregateError|fetch failed/i.test(msg);
 }
 
 export async function pollTask(
@@ -99,7 +292,11 @@ export async function pollTask(
       if (result.completed) return result;
       if (result?.error) return result;
     } catch (e: any) {
-      return { completed: false, error: u.error(e).message || "poll error" };
+      if (isTransientNetworkError(e)) {
+        await new Promise((res) => setTimeout(res, interval));
+        continue;
+      }
+      return { completed: false, error: normalizeError(e).message || "poll error" };
     }
     await new Promise((res) => setTimeout(res, interval));
   }

@@ -190,6 +190,26 @@ export default async (knex: Knex): Promise<void> => {
   if (Number(toonflowVer) < 3.2) {
     u.vendor.writeCode("toonflow", vendorData["toonflow.ts"]);
   }
+  if (vendorData["aihubmix.ts"]) {
+    try {
+      const aihubmixVer = await u.vendor.getVendor("aihubmix").version;
+      if (Number(aihubmixVer) < 2.4) {
+        u.vendor.writeCode("aihubmix", vendorData["aihubmix.ts"]);
+      }
+    } catch {
+      // 供应商尚未安装，忽略
+    }
+  }
+  if (vendorData["qichen.ts"]) {
+    try {
+      const qichenVer = await u.vendor.getVendor("qichen").version;
+      if (Number(qichenVer) < 2.1) {
+        u.vendor.writeCode("qichen", vendorData["qichen.ts"]);
+      }
+    } catch {
+      // 供应商尚未安装，忽略
+    }
+  }
 };
 
 async function tempOnsert(tsCode: string) {

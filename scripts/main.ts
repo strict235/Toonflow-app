@@ -3,6 +3,8 @@ import path from "path";
 import fs from "fs";
 import Module from "module";
 
+app.setName("toonflow");
+
 // 加速 Electron 启动：跳过 GPU 信息收集，减少初始化耗时
 app.commandLine.appendSwitch("disable-gpu-shader-disk-cache");
 app.commandLine.appendSwitch("disable-features", "CalculateNativeWinOcclusion");
@@ -16,6 +18,16 @@ function copyDir(src: string, dest: string): void {
     const s = path.join(src, entry.name);
     const d = path.join(dest, entry.name);
     entry.isDirectory() ? copyDir(s, d) : fs.existsSync(d) || fs.copyFileSync(s, d);
+  }
+}
+
+/** 开发环境：将项目 data 下的资源合并同步到 userData，便于仓库内新增风格/供应商即时生效 */
+function syncDevDataFromProject(): void {
+  if (app.isPackaged) return;
+  const srcRoot = path.join(process.cwd(), "data");
+  const destRoot = path.join(app.getPath("userData"), "data");
+  for (const dir of TARGET_ENTRIES) {
+    copyDir(path.join(srcRoot, dir), path.join(destRoot, dir));
   }
 }
 
@@ -180,6 +192,8 @@ app.whenReady().then(async () => {
       initializeData();
       servePath = path.join(app.getPath("userData"), "data", "serve", "app.js");
     } else {
+      // 开发环境：同步项目 data 到 userData，确保新增视觉风格等资源可见
+      syncDevDataFromProject();
       // 开发环境：直接加载源码（tsx 通过 -r tsx 注册了 require 钩子）
       servePath = path.join(process.cwd(), "src", "app.ts");
     }
