@@ -26,6 +26,7 @@ export default router.post(
   }),
   async (req, res) => {
     const { prompt, duration, state, src, scriptId, projectId, videoDesc, shouldGenerateImage } = req.body;
+    const normalizedPrompt = (prompt ?? "").trim() || (videoDesc ?? "").trim();
     const trackId = Date.now()
     await u.db("o_videoTrack").insert({
       id: trackId,
@@ -33,7 +34,7 @@ export default router.post(
       projectId,
     });
     const [id] = await u.db("o_storyboard").insert({
-      prompt,
+      prompt: normalizedPrompt,
       duration,
       state,
       filePath: u.replaceUrl(src),

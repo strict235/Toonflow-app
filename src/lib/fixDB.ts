@@ -203,7 +203,7 @@ export default async (knex: Knex): Promise<void> => {
   if (vendorData["qichen.ts"]) {
     try {
       const qichenVer = await u.vendor.getVendor("qichen").version;
-      if (Number(qichenVer) < 2.1) {
+      if (Number(qichenVer) < 2.2) {
         u.vendor.writeCode("qichen", vendorData["qichen.ts"]);
       }
     } catch {

@@ -26,8 +26,9 @@ export default router.post(
     const { data, scriptId, projectId } = req.body;
     if (!data.length) return res.status(400).send({ success: false, message: "数据不能为空" });
     for (const item of data) {
+      const normalizedPrompt = (item.prompt ?? "").trim() || (item.videoDesc ?? "").trim();
       const [id] = await u.db("o_storyboard").insert({
-        prompt: item.prompt,
+        prompt: normalizedPrompt,
         duration: String(item.duration),
         state: item.state,
         scriptId,

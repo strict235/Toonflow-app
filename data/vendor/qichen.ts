@@ -1,9 +1,10 @@
 /**
  * Toonflow AI供应商 - 七辰 API
- * @version 2.1
+ * @version 2.2
  *
  * 文档：https://api.qichen001.asia/docs
- * 视频：POST /v1/videos，轮询 GET /v1/videos/{id}
+ * 图片：POST /v1/images/generations、/v1/images/edits（gpt-image-2）
+ * 视频：POST /v1/videos，轮询 GET /v1/videos/{id}（sd2）
  */
 
 // ============================================================
@@ -129,11 +130,11 @@ const SD2_DURATION = 15;
 
 const vendor: VendorConfig = {
   id: "qichen",
-  version: "2.1",
+  version: "2.2",
   author: "Toonflow",
   name: "七辰 API",
   description:
-    "七辰 API 聚合平台，支持 Seedance 2.0（sd2）视频生成。\n\n[文档](https://api.qichen001.asia/docs) | [控制台](https://api.qichen001.asia)\n\nsd2 固定 15 秒；参考图/视频/音频需公网可访问链接，本地素材将自动上传临时图床后提交。",
+    "七辰 API 聚合平台，支持 gpt-image-2 图片生成与 Seedance 2.0（sd2）视频生成。\n\n[文档](https://api.qichen001.asia/docs) | [控制台](https://api.qichen001.asia)\n\n图片：文生图 / 多图参考编辑；视频：sd2 固定 15 秒，本地素材将自动上传临时图床后提交。",
   inputs: [
     { key: "apiKey", label: "API密钥", type: "password", required: true, placeholder: "sk-..." },
     {
@@ -149,6 +150,12 @@ const vendor: VendorConfig = {
     baseUrl: "https://api.qichen001.asia/v1",
   },
   models: [
+    {
+      name: "GPT Image 2",
+      modelName: "gpt-image-2",
+      type: "image",
+      mode: ["text", "singleImage", "multiReference"],
+    },
     {
       name: "Seedance 2.0 (SD2)",
       modelName: "sd2",
@@ -314,20 +321,29 @@ const formatRequestError = (err: any, action: string): Error => {
 };
 
 const normalizeImageSize = (size: ImageConfig["size"], aspectRatio: ImageConfig["aspectRatio"]): string => {
+  // 文档：3840x2160 / 2160x3840 按 4K 计费，其它按 2K；优先使用文档示例尺寸
   const table: Record<string, Record<string, string>> = {
-    "1K": { "1:1": "1024x1024", "16:9": "1536x1024", "9:16": "1024x1536" },
-    "2K": { "1:1": "2048x2048", "16:9": "2848x1600", "9:16": "1600x2848" },
-    "4K": { "1:1": "4096x4096", "16:9": "3840x2160", "9:16": "2160x3840" },
+    "1K": { "1:1": "1024x1024", "16:9": "1536x1024", "9:16": "1152x2048" },
+    "2K": { "1:1": "2048x2048", "16:9": "2048x1152", "9:16": "1152x2048" },
+    "4K": { "1:1": "2048x2048", "16:9": "3840x2160", "9:16": "2160x3840" },
   };
-  return table[size]?.[aspectRatio] || "1024x1024";
+  return table[size]?.[aspectRatio] || "1152x2048";
+};
+
+const collectImageRefs = (config: ImageConfig): string[] => {
+  const fromReferenceList = (config.referenceList || []).map((item) => item.base64).filter(Boolean);
+  if (fromReferenceList.length > 0) return fromReferenceList;
+  return (config.imageBase64 || []).filter(Boolean);
 };
 
 const parseImageResponse = async (data: any): Promise<string> => {
+  if (data?.error) throw new Error(data.error.message || JSON.stringify(data.error));
   const items = data?.data;
   if (!Array.isArray(items) || items.length === 0) throw new Error("图片生成失败：未返回有效结果");
   for (const item of items) {
     if (item?.b64_json) return item.b64_json.startsWith("data:") ? item.b64_json : `data:image/png;base64,${item.b64_json}`;
     if (item?.url) return await urlToBase64(item.url);
+    if (item?.error) throw new Error(item.error.message || JSON.stringify(item.error));
   }
   throw new Error("图片生成失败：响应中无可用图片");
 };
@@ -340,8 +356,65 @@ const textRequest = (_model: TextModel, _think: boolean, _thinkLevel: 0 | 1 | 2 
   throw new Error("七辰 API 当前供应商未配置文本模型");
 };
 
-const imageRequest = async (_config: ImageConfig, _model: ImageModel): Promise<string> => {
-  throw new Error("七辰 API 请使用 sd2 视频模型；图片生成可在控制台单独配置 gpt-image-2");
+const imageRequest = async (config: ImageConfig, model: ImageModel): Promise<string> => {
+  if (model.modelName !== "gpt-image-2") throw new Error(`不支持的图片模型：${model.modelName}`);
+
+  const prompt = (config.prompt ?? "").trim();
+  if (!prompt) {
+    throw new Error("图片请求失败：prompt 不能为空。请填写提示词后再进行文生图/图生图。");
+  }
+
+  const size = normalizeImageSize(config.size, config.aspectRatio);
+  const quality = "medium";
+  const imageRefs = collectImageRefs(config);
+
+  if (imageRefs.length === 0) {
+    logger(`[七辰] 文生图 gpt-image-2，尺寸：${size}`);
+    try {
+      const resp = await requestWithRetry(
+        () =>
+          axios.post(
+            `${getBaseUrl()}/images/generations`,
+            { model: "gpt-image-2", prompt, size, quality, n: 1 },
+            getAxiosConfig(),
+          ),
+        "文生图",
+      );
+      return await parseImageResponse(resp.data);
+    } catch (err) {
+      throw formatRequestError(err, "图片生成请求失败");
+    }
+  }
+
+  logger(`[七辰] 图生图/编辑 gpt-image-2，参考图：${imageRefs.length} 张，尺寸：${size}`);
+  const form = new FormData();
+  form.append("model", "gpt-image-2");
+  form.append("prompt", prompt);
+  form.append("size", size);
+  form.append("quality", quality);
+  form.append("n", "1");
+  for (let i = 0; i < imageRefs.length; i++) {
+    const { buffer, mime, ext } = decodeBase64(imageRefs[i]);
+    // 文档多图参考使用 image[] 数组语法
+    form.append("image[]", buffer, { filename: `ref${i}.${ext === "bin" ? "png" : ext}`, contentType: mime });
+  }
+
+  try {
+    const resp = await requestWithRetry(
+      () =>
+        axios.post(`${getBaseUrl()}/images/edits`, form, {
+          ...getAxiosConfig({ Authorization: `Bearer ${getApiKey()}` }),
+          headers: {
+            Authorization: `Bearer ${getApiKey()}`,
+            ...form.getHeaders(),
+          },
+        }),
+      "图生图/编辑",
+    );
+    return await parseImageResponse(resp.data);
+  } catch (err) {
+    throw formatRequestError(err, "图片编辑请求失败");
+  }
 };
 
 const videoRequest = async (config: VideoConfig, model: VideoModel): Promise<string> => {

@@ -1,8 +1,9 @@
 import { VM } from "vm2";
 import sharp from "sharp";
 import axios, { type AxiosInstance } from "axios";
-import { HttpsProxyAgent } from "https-proxy-agent";
-import { HttpProxyAgent } from "http-proxy-agent";
+// 这里用 require 避免 TS 在旧 moduleResolution 下找不到 d.ts
+const { HttpsProxyAgent } = require("https-proxy-agent") as any;
+const { HttpProxyAgent } = require("http-proxy-agent") as any;
 import { createOpenAI } from "@ai-sdk/openai";
 import { createDeepSeek } from "@ai-sdk/deepseek";
 import { createZhipu } from "zhipu-ai-provider";
@@ -209,6 +210,9 @@ export default function runCode(code: string, vendor?: Record<string, any>) {
     pollTask,
     fetch: proxiedFetch,
     proxiedFetch,
+    // 供应商脚本可能需要延时/退避重试
+    setTimeout,
+    clearTimeout,
     exports,
     axios: vendorAxios,
     createAxios,

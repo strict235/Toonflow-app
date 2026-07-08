@@ -92,21 +92,28 @@ export default router.post(
     );
 
     const generateTask = async (item: (typeof storyboardData)[number]) => {
+      const promptFromDb = (item.prompt ?? "").trim();
+      const promptFallback = (item.videoDesc ?? "").trim();
+      const prompt = promptFromDb || promptFallback;
       const repeloadObj = {
-        prompt: item.prompt!,
+        prompt,
         size: projectSettingData?.imageQuality as "1K" | "2K" | "4K",
         aspectRatio: projectSettingData?.videoRatio as `${number}:${number}`,
       };
       try {
+        if (!repeloadObj.prompt) {
+          throw new Error("分镜图片生成失败：分镜提示词为空（prompt 与 videoDesc 均为空）。请先生成/补全分镜提示词后再生成图片。");
+        }
+        const refs = await getAssetsImageBase64(assetRecord[item.id!] || []);
         const imageCls = await u.Ai.Image(projectSettingData?.imageModel as `${string}:${string}`).run(
           {
-            referenceList: await getAssetsImageBase64(assetRecord[item.id!] || []),
+            referenceList: refs,
             ...repeloadObj,
           },
           {
             taskClass: "生成分镜图片",
             describe: "分镜图片生成",
-            relatedObjects: JSON.stringify(repeloadObj),
+            relatedObjects: JSON.stringify({ ...repeloadObj, referenceCount: refs.length }),
             projectId: projectId,
           },
         );

@@ -15,8 +15,9 @@ export default router.post(
   }),
   async (req, res) => {
     const { id, prompt, videoDesc } = req.body;
+    const normalizedPrompt = (prompt ?? "").trim() || (videoDesc ?? "").trim();
     await u.db("o_storyboard").where({ id }).update({
-      prompt,
+      prompt: normalizedPrompt,
       videoDesc,
     });
     res.status(200).send(success({ message: "更新提示词成功" }));

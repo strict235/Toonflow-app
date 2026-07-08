@@ -1,6 +1,6 @@
 /**
  * Toonflow AI供应商 - AIHubMix
- * @version 2.5
+ * @version 2.7
  *
  * 文档：https://docs.aihubmix.com/cn
  * 图片生成：OpenAI 兼容接口 /v1/images/generations 与 /v1/images/edits
@@ -126,7 +126,7 @@ declare const exports: {
 
 const vendor: VendorConfig = {
   id: "aihubmix",
-  version: "2.5",
+  version: "2.7",
   author: "Toonflow",
   name: "AIHubMix",
   description:
@@ -314,13 +314,16 @@ const formatRequestError = (err: any, action: string): Error => {
 const postJsonWithFallback = async (path: string, body: Record<string, any>) => {
   let lastErr: any;
   for (const baseUrl of getBaseUrlCandidates()) {
-    try {
-      logger(`[AIHubMix] POST ${baseUrl}${path}`);
-      return await axios.post(`${baseUrl}${path}`, body, getAxiosConfig(getAuthHeaders()));
-    } catch (err) {
-      lastErr = err;
-      logger(`[AIHubMix] ${baseUrl}${path} 失败：${unwrapErrorMessage(err)}`);
-      if (!isRetryableError(err)) break;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        logger(`[AIHubMix] POST ${baseUrl}${path}（try ${attempt + 1}/3）`);
+        return await axios.post(`${baseUrl}${path}`, body, getAxiosConfig(getAuthHeaders()));
+      } catch (err) {
+        lastErr = err;
+        logger(`[AIHubMix] ${baseUrl}${path} 失败：${unwrapErrorMessage(err)}`);
+        if (!isRetryableError(err)) break;
+        await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+      }
     }
   }
   throw lastErr;
@@ -329,19 +332,22 @@ const postJsonWithFallback = async (path: string, body: Record<string, any>) => 
 const postFormWithFallback = async (path: string, form: any) => {
   let lastErr: any;
   for (const baseUrl of getBaseUrlCandidates()) {
-    try {
-      logger(`[AIHubMix] POST ${baseUrl}${path} (multipart)`);
-      return await axios.post(`${baseUrl}${path}`, form, {
-        ...getAxiosConfig({ Authorization: `Bearer ${getApiKey()}` }),
-        headers: {
-          Authorization: `Bearer ${getApiKey()}`,
-          ...form.getHeaders(),
-        },
-      });
-    } catch (err) {
-      lastErr = err;
-      logger(`[AIHubMix] ${baseUrl}${path} 失败：${unwrapErrorMessage(err)}`);
-      if (!isRetryableError(err)) break;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        logger(`[AIHubMix] POST ${baseUrl}${path} (multipart)（try ${attempt + 1}/3）`);
+        return await axios.post(`${baseUrl}${path}`, form, {
+          ...getAxiosConfig({ Authorization: `Bearer ${getApiKey()}` }),
+          headers: {
+            Authorization: `Bearer ${getApiKey()}`,
+            ...form.getHeaders(),
+          },
+        });
+      } catch (err) {
+        lastErr = err;
+        logger(`[AIHubMix] ${baseUrl}${path} 失败：${unwrapErrorMessage(err)}`);
+        if (!isRetryableError(err)) break;
+        await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+      }
     }
   }
   throw lastErr;
@@ -388,6 +394,10 @@ const textRequest = (model: TextModel, think: boolean, thinkLevel: 0 | 1 | 2 | 3
 };
 
 const imageRequest = async (config: ImageConfig, model: ImageModel): Promise<string> => {
+  const prompt = (config.prompt ?? "").trim();
+  if (!prompt) {
+    throw new Error("图片编辑请求失败：prompt 不能为空。请填写提示词后再进行参考图编辑/图生图。");
+  }
   const resolvedSize = resolveImageSize(config.size, config.aspectRatio);
   const quality = resolveQuality(config.size);
   const imageRefs = collectImageRefs(config);
@@ -397,7 +407,7 @@ const imageRequest = async (config: ImageConfig, model: ImageModel): Promise<str
     try {
       const response = await postJsonWithFallback("/images/generations", {
         model: model.modelName,
-        prompt: config.prompt,
+        prompt,
         n: 1,
         size: resolvedSize,
         quality,
@@ -411,7 +421,7 @@ const imageRequest = async (config: ImageConfig, model: ImageModel): Promise<str
   logger(`[AIHubMix] 图生图/编辑，模型：${model.modelName}，参考图：${imageRefs.length} 张`);
   const form = new FormData();
   form.append("model", model.modelName);
-  form.append("prompt", config.prompt);
+  form.append("prompt", prompt);
   form.append("n", "1");
   form.append("size", resolvedSize);
   form.append("quality", quality);
@@ -419,7 +429,8 @@ const imageRequest = async (config: ImageConfig, model: ImageModel): Promise<str
   for (let i = 0; i < imageRefs.length; i++) {
     const { buffer, mime } = decodeBase64Image(imageRefs[i]);
     const ext = mime.includes("jpeg") || mime.includes("jpg") ? "jpg" : "png";
-    form.append("image", buffer, { filename: `ref${i}.${ext}`, contentType: mime });
+    // AIHubMix / OpenAI-compatible edits：多图参考需使用数组语法 image[]
+    form.append("image[]", buffer, { filename: `ref${i}.${ext}`, contentType: mime });
   }
 
   try {
